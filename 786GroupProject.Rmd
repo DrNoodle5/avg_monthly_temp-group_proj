@@ -14,6 +14,7 @@ library(tidyverse)
 library(imputeTS)
 data <- read_csv("wellington.csv") %>%
   mutate(Date = yearmonth(paste(Year, Month))) %>%
+  select(-Month, -Year) %>% # removed month and year because we already have date.
   as_tsibble(index = Date)
 
 colSums(is.na(data))
