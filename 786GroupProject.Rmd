@@ -16,19 +16,19 @@ data <- read_csv("wellington.csv") %>%
   mutate(Date = yearmonth(paste(Year, Month))) %>%
   as_tsibble(index = Date)
 
-training <- data %>%
-  filter(Date <= yearmonth("2025 April"))
-
-test <- data %>%
-  filter(Date > yearmonth("2025 April"))
-
 colSums(is.na(data))
 
 scan_gaps(data)
 
 data <- data %>%
   fill_gaps() %>%
-  mutate(YourColumn = na_seadec(Temperature, algorithm = "interpolation"))
+  mutate(Temperature = na_seadec(Temperature, algorithm = "interpolation"))
+
+training <- data %>%
+  filter(Date <= yearmonth("2025 April"))
+
+test <- data %>%
+  filter(Date > yearmonth("2025 April"))
 ```
 
 
