@@ -7,11 +7,14 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(imputeTS)
+library(tsibble)
+library(zoo)
+library(patchwork)
 ```
 
 ```{r}
-library(tidyverse)
-library(imputeTS)
 data <- read_csv("wellington.csv") %>%
   mutate(Date = yearmonth(paste(Year, Month))) %>%
   select(-Month, -Year) %>% # removed month and year because we already have date.
@@ -22,8 +25,39 @@ colSums(is.na(data))
 scan_gaps(data)
 
 data <- data %>%
-  fill_gaps() %>%
-  mutate(Temperature = na_seadec(Temperature, algorithm = "interpolation"))
+  fill_gaps()
+
+# Convert to ts for imputeTS methods
+temp_ts <- ts(data$Temperature, frequency = 12)
+
+# Create a comparison dataframe with all methods
+comparison <- data %>%
+  as_tibble() %>%
+  mutate(
+    Original        = Temperature,
+    LOCF            = as.numeric(na.locf(temp_ts, na.rm = FALSE)),
+    NOCB            = as.numeric(na.locf(temp_ts, fromLast = TRUE, na.rm = FALSE)),
+    Linear          = as.numeric(na_interpolation(temp_ts, option = "linear")),
+    Spline          = as.numeric(na_interpolation(temp_ts, option = "spline")),
+    Seasonal        = as.numeric(na_seadec(temp_ts, algorithm = "interpolation"))
+  ) %>%
+  select(Date, Original, LOCF, NOCB, Linear, Spline, Seasonal) %>%
+  pivot_longer(-Date, names_to = "Method", values_to = "Temperature")
+
+# Plot all methods
+comparison %>%
+  mutate(Method = factor(Method, levels = c("Original", "LOCF", "NOCB", 
+                                             "Linear", "Spline", "Seasonal"))) %>%
+  ggplot(aes(x = Date, y = Temperature)) +
+  geom_line(linewidth = 0.3) +
+  facet_wrap(~ Method, ncol = 1) +
+  labs(title = "Wellington Monthly Temperature — Interpolation Method Comparison",
+       y = "Temperature (°C)", x = "Date") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+  
+data <- data %>%
+  mutate(Temperature = na_seadec(Temperature, algorithm = "interpolation", frequency(12)))
 
 training <- data %>%
   filter(Date <= yearmonth("2025 April"))
@@ -32,7 +66,26 @@ test <- data %>%
   filter(Date > yearmonth("2025 April"))
 ```
 
-```{r ETS}
+```{r plots}
+data %>%
+  autoplot(Temperature) +
+  labs(title = "Wellington Monthly Temperature",
+       y = "Temperature (°C)",
+       x = "Date") +
+  theme_minimal()
 
+data %>%
+  gg_subseries(Temperature) +
+  labs(title = "Wellington Temperature Seasonal Subseries",
+       y = "Temperature (°C)",
+       x = "Month") +
+  theme_minimal()
+
+data %>%
+  model(STL(Temperature ~ trend() + season(window = "periodic"))) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "STL Decomposition of Wellington Temperature") +
+  theme_minimal()
 ```
 
