@@ -59,6 +59,9 @@ comparison %>%
 data <- data %>%
   mutate(Temperature = na_seadec(Temperature, algorithm = "interpolation", frequency(12)))
 
+data <- data %>%
+  mutate(Temperature = as.numeric(Temperature))
+
 training <- data %>%
   filter(Date <= yearmonth("2025 April"))
 
@@ -87,5 +90,7 @@ data %>%
   autoplot() +
   labs(title = "STL Decomposition of Wellington Temperature") +
   theme_minimal()
+
+data %>% gg_tsdisplay(Temperature, plot_type = "partial")
 ```
 
