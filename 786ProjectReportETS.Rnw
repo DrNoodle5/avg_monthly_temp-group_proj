@@ -1,0 +1,366 @@
+\documentclass[11pt, a4paper]{article}
+
+% packages
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+
+% title page
+\title{\textbf{STATS 786: Group Project} \\ Average Monthly Temperatures in Wellington}
+\author{
+  Group Leader: [palceholder] \\
+  Group Members: [Eric Heo], [Dominicus Nararya], [Simon Loh]
+}
+\date{\today}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+\maketitle
+
+% R Setup Chunk
+<<setup, include=FALSE>>=
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.pos = "H", out.width="100%")
+library(tidyverse)
+library(fpp3)
+library(imputeTS)
+library(zoo)
+library(patchwork)
+library(feasts)
+library(fable)
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align = "center")
+@
+
+\tableofcontents
+\newpage
+
+\section{Data Cleaning and Exploratory Data Analysis}
+
+The dataset contains average monthly temperatures for Wellington. To prepare the data for modeling, we first formatted the date index and cast the data into a \texttt{tsibble} object. As per the project requirements, we split the data into a training set (all data up to April 2025) and a test set containing the final $h=12$ months (May 2025 to April 2026) to evaluate our models' true predictive performance. 
+
+We also scanned the series for missing values. Because temperature data is heavily driven by the time of year, simple imputation methods like Last Observation Carried Forward (LOCF) or linear interpolation can distort the natural seasonal curve if a gap occurs during a seasonal peak or trough. To determine the best strategy, we plotted multiple imputation techniques against each other. We selected Seasonal Interpolation (\texttt{na\_seadec}), which decomposes the series, interpolates the seasonally adjusted data, and adds the seasonality back in, preserving the natural climate cycles.
+
+<<data-cleaning, echo=TRUE, fig.cap="Comparison of Missing Value Imputation Methods", fig.pos="H">>=
+data <- read_csv("wellington.csv") %>%
+  mutate(Date = yearmonth(paste(Year, Month))) %>%
+  select(-Month, -Year) %>% 
+  as_tsibble(index = Date)
+
+# scanning for missing values
+colSums(is.na(data))
+scan_gaps(data)
+
+# filling implicit gaps in time index
+data <- data %>% fill_gaps()
+
+# convert to ts for imputeTS methods
+temp_ts <- ts(data$Temperature, frequency = 12)
+
+# create comparison dataframe with all methods
+comparison <- data %>%
+  as_tibble() %>%
+  mutate(
+    Original        = Temperature,
+    LOCF            = as.numeric(na.locf(temp_ts, na.rm = FALSE)),
+    NOCB            = as.numeric(na.locf(temp_ts, fromLast = TRUE, na.rm = FALSE)),
+    Linear          = as.numeric(na_interpolation(temp_ts, option = "linear")),
+    Spline          = as.numeric(na_interpolation(temp_ts, option = "spline")),
+    Seasonal        = as.numeric(na_seadec(temp_ts, algorithm = "interpolation"))
+  ) %>%
+  select(Date, Original, LOCF, NOCB, Linear, Spline, Seasonal) %>%
+  pivot_longer(-Date, names_to = "Method", values_to = "Temperature")
+
+comparison %>%
+  mutate(Method = factor(Method, levels = c("Original", "LOCF", "NOCB",
+                                             "Linear", "Spline", "Seasonal"))) %>%
+  ggplot(aes(x = Date, y = Temperature)) +
+  geom_line(linewidth = 0.3) +
+  facet_wrap(~ Method, ncol = 1) +
+  labs(title = "Wellington Monthly Temperature — Interpolation Method Comparison",
+       y = "Temperature (°C)", x = "Date") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+# apply chosen seasonal imputation
+data <- data %>%
+  mutate(Temperature = na_seadec(Temperature, algorithm = "interpolation", frequency(12))) %>%
+  mutate(Temperature = as.numeric(Temperature))
+
+# creating training + test sets
+training <- data %>%
+  filter(Date <= yearmonth("2025 April"))
+
+test <- data %>%
+  filter(Date > yearmonth("2025 April"))
+@
+
+\subsection{Visualizing the Time Series}
+To understand the underlying behavior of Wellington's temperatures, we produced a standard time plot, a seasonal subseries plot, and an STL decomposition.
+
+<<eda-plots, echo=TRUE, fig.show="hold", fig.pos="H">>=
+# standard time plot
+data %>%
+  autoplot(Temperature) +
+  labs(title = "Wellington Monthly Temperature",
+       y = "Temperature (°C)",
+       x = "Date") +
+  theme_minimal()
+
+# seasonal subseries plot
+data %>%
+  gg_subseries(Temperature) +
+  labs(title = "Wellington Temperature Seasonal Subseries",
+       y = "Temperature (°C)",
+       x = "Month") +
+  theme_minimal()
+
+# STL decomp
+data %>%
+  model(STL(Temperature ~ trend() + season(window = "periodic"))) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "STL Decomposition of Wellington Temperature") +
+  theme_minimal()
+@
+
+\textbf{Observed Features:}
+palceholder ghaksfsgjdklnbkjdnkjsjkgserf
+
+\section{ETS Models}
+
+The trend component in the STL decomposition shows that there is a slight upward trend with Temperature increasing over time with peaks and troughs of 14.0 and 12.5 C in the 1960's to 15.0 and 13.5 C in the 2010's. Three trend specifications were considered no trend (N), additive trend (A), and damped additive trend (Ad).
+
+The remainder component shows roughly constant variance throughout the whole time series from 1960 to 2025 meaning there is no heteroscedacity. This means that additive errors (A) are appropriate, so we will not include multiplicative error models. 
+
+The seasonal component shows highly stable yearly annual cycle that remains unchanged over the whole time series. As the magnitude of seasonal fluctuations does not vary, additive seasonality (A) is appropriate. We will not consider multiplicative seasonality.
+
+As such the following models were shortlisted:
+ETS(A,N,A), ETS(A,A,A), and ETS(A,Ad,A).
+
+<<ets-models, echo=TRUE>>=
+fit <- training %>%
+  model(
+    ANA  = ETS(Temperature ~ error("A") + trend("N") + season("A")),
+    AAA  = ETS(Temperature ~ error("A") + trend("A") + season("A")),
+    AAdA = ETS(Temperature ~ error("A") + trend("Ad") + season("A")),
+    auto = ETS(Temperature)
+  )
+
+fit %>% select(auto) %>% report()
+
+glance(fit) %>%
+  select(.model, AIC, AICc, BIC) %>%
+  arrange(AICc)
+@
+
+The ETS(A,N,A) model will likely have the best predictive ability as it has the lowest AICc (manually) and was also the best model automatically selected. This suggests that even though there is a slight increasing trend of temperature in the STL decomposition, the trend component does not improve out-of-sample predictive ability. 
+
+The fitted ETS(A,N,A) model equations are as follows:
+
+\[
+y_t = \ell_{t-1} + s_{t-12} + \varepsilon_t
+\]
+
+\[
+\ell_t = \ell_{t-1} + 0.1258\varepsilon_t
+\]
+
+\[
+s_t = s_{t-12} + 0.0001\varepsilon_t
+\]
+
+where $\varepsilon_t \sim \mathrm{NID}(0,\ 0.7357)$ and $\ell_0 = 13.7527$.
+
+\section{ARIMA Models}
+
+<<arima-models, echo=TRUE>>=
+# Insert ARIMA model fitting + code
+
+@
+
+\section{Dynamic Regression Models}
+
+\subsection{Dynamic Regression Explanation}
+When we build a standard multiple linear regression model, we have to assume that our errors (the residuals) are not autocorrelated; otherwise, our forecasts become inefficient and our statistical tests become unreliable. In time series data, this assumption is almost always violated because data points collected sequentially are naturally correlated with one another. Dynamic regression addresses this problem by, actively modelling the autocorrelation in the errors using an ARIMA process instead of hoping our errors are random white noise. 
+
+We can think of a dynamic regression model as having two parts:
+\begin{enumerate}
+    \item \textbf{The Deterministic Part:} The standard regression equation where we predict our target using explanatory variables (like a linear trend, Fourier terms for seasonality, or dummy variables for outlier spikes).
+    \item \textbf{The Stochastic Part:} An ARIMA model fitted to the residuals of that regression to capture the remaining time-dependent patterns.
+\end{enumerate}
+
+Mathematically, it looks like this:
+$$y_t = \beta_0 + \beta_1 x_{1,t} + \dots + \beta_k x_{k,t} + \eta_t$$
+Where $y_t$ is our observation, the $\beta$ terms are our regression coefficients, and $\eta_t$ is an ARIMA error term.
+
+\subsection{Model Exploration and Selection}
+To capture the monthly seasonality of Wellington's temperatures, we will use a Fourier series (harmonic regression) instead of seasonal dummy variables, as it is highly effective for periodic functions. Because we have monthly data ($m=12$), the maximum number of Fourier pairs $K$ we can include is $m/2 = 6$. 
+
+We will fit models from K=1 to K=6, alongside a linear trend.
+
+<<dynamic-exploration, echo=TRUE>>=
+# The ARIMA() function will automatically handle ARIMA error fitting procedure
+fit_dynamic <- training %>%
+  model(
+    K1 = ARIMA(Temperature ~ trend() + fourier(K = 1)),
+    K2 = ARIMA(Temperature ~ trend() + fourier(K = 2)),
+    K3 = ARIMA(Temperature ~ trend() + fourier(K = 3)),
+    K4 = ARIMA(Temperature ~ trend() + fourier(K = 4)),
+    K5 = ARIMA(Temperature ~ trend() + fourier(K = 5)),
+    K6 = ARIMA(Temperature ~ trend() + fourier(K = 6))
+  )
+
+glance(fit_dynamic) %>%
+  select(.model, AIC, AICc, BIC) %>%
+  arrange(AICc)
+@
+
+We evaluated dynamic regression models ranging from K=1 to K=6. While K=2 provided the lowest BIC, we will select K=3 model for our final forecasts as it yielded the lowest AICc (1893.659), which is the preferred metric for optimising predictive forecasting performance.
+
+<<dynamic-interpretation, echo=TRUE>>=
+best_dynamic <- fit_dynamic %>% select(K3)
+
+# get coeffs
+dynamic_coefs <- tidy(best_dynamic)
+
+# isolate trend() component
+trend_component <- dynamic_coefs %>% filter(term == "trend()")
+
+# compute 95% CI for monthly slope
+slope <- trend_component$estimate
+std_error <- trend_component$std.error
+z_val <- 1.96
+
+ci_lower <- slope - (z_val * std_error)
+ci_upper <- slope + (z_val * std_error)
+
+# convert monthly step change to a change per century
+# 12 months * 100 years = 1200 steps
+century_change <- slope * 1200
+century_ci_lower <- ci_lower * 1200
+century_ci_upper <- ci_upper * 1200
+
+cat("Monthly Slope:", slope, "\n")
+cat("95% CI for Monthly Slope: [", ci_lower, ",", ci_upper, "]\n")
+cat("Expected change per century:", century_change, "°C\n")
+cat("95% CI per century: [", century_ci_lower, "°C ,", century_ci_upper, "°C ]\n")
+@
+
+\textbf{Trend Interpretation and Long-Term Climate Claim} \\
+The linear slope estimate of \textbf{0.00138} (95\% CI: \textbf{0.00080} to \textbf{0.00197}) indicates that the average monthly temperatures in Wellington are \textbf{rising} over the long term. Extrapolating this monthly trend, the expected change per century is approximately \textbf{1.66}$^\circ$C (95\% CI: \textbf{0.96}$^\circ$C to \textbf{2.36}$^\circ$C).
+
+\section{Assumption Checking}
+
+\subsection{ETS Models Assumptions}
+
+<<ets-assumptions, echo = TRUE, fig.cap="Residual Diagnostics for ETS(A,N,A) Model", fig.pos="H">>=
+best_fit <- fit %>%
+  select(ANA)
+
+# Residual diagnostic plot
+best_fit %>%
+  gg_tsresiduals(lag_max = 48) +
+  labs(title = "Residual Diagnostics: ETS(A,N,A)") +
+  theme_minimal()
+
+# Ljung-Box test
+augment(best_fit) %>%
+  features(.innov, ljung_box, lag = 48, dof = 15)
+@
+
+The innovation residuals appear to fluctuate randomly around zero with roughly constant variance across the full time period, suggesting no obvious pattern or heteroscedasticity remains.
+
+There are a few significant spikes, notably around lag 12 and lag 35, suggesting some remaining autocorrelation at seasonal lags that the model has not fully captured.
+
+The residuals are roughly bell-shaped and centred near zero, which is broadly consistent with the normality assumption, though there is a slight right skew.
+
+The Ljung-Box test shows with a test statistic of 62.03 and a p-value of 0.0016 < 0.05, we reject the null hypothesis of no autocorrelation in the residuals. This indicates statistically significant autocorrelation remains.
+
+Based on the Ljung-Box result and the significant ACF spikes at seasonal lags, the ETS(A,N,A) model residuals are not fully consistent with white noise. This suggests the model may not have captured all the structure in the data, and therefore some caution is warranted when using this model for forecasting. Prediction intervals in particular may be underestimated.
+
+\subsection{Dynamic Regression Models Assumptions}
+
+<<assumption-checking, echo=TRUE, fig.cap="Residual Diagnostics for the K=3 Dynamic Regression Model", fig.pos="H">>=
+# Residual diagnostic plots for regression model
+best_dynamic %>% gg_tsresiduals() +
+  labs(title = "Residual Diagnostics: Best Dynamic Regression Model (K=3)")
+
+# Ljung-Box test to check remaining autocorrelation -> using lag = 24 for monthly data
+augment(best_dynamic) %>%
+  features(.innov, ljung_box, lag = 24, dof = 5)
+@
+
+\textbf{Assumption Diagnostics} \\
+For the model to be trusted for forecasting, the residuals must resemble independent white noise. Visual inspection of the innovation residuals shows constant variance over time with no obvious patterns. Furthermore, the ACF plot displays no significant autocorrelation spikes extending beyond the 95\% confidence bounds. This visual assessment is formally confirmed by the Ljung-Box test, which yielded a p-value of 0.842. Because the p-value is significantly greater than 0.05, we fail to reject the null hypothesis, confirming the residuals are indistinguishable from white noise. The K=3 dynamic regression model successfully captures all available time-dependent information and is highly trusted for forecasting.
+
+\section{Forecasting}
+
+\subsection{}
+
+<<ets-forecasting, echo=TRUE, fig.cap="ETS Model Forecasts vs Actuals", fig.pos="H">>=
+fc <- best_fit %>%
+  forecast(h = 12)
+
+# Accuracy on test set
+fc %>%
+  accuracy(data) %>%
+  select(.model, RMSE, MAE, MAPE, MASE) %>%
+  arrange(RMSE)
+
+# Plot forecasts vs actuals
+fc %>%
+  autoplot(
+    data %>% filter(Date >= yearmonth("2022 Jan")),
+    level = 95,
+    alpha = 0.5
+  ) +
+  labs(title = "ETS Model Forecasts vs Actuals",
+       y = "Temperature (°C)", x = "Date") +
+  theme_minimal()
+@
+
+The ETS(A,N,A) model captures the seasonal pattern of Wellington temperatures well, with the point forecasts (black line) tracking the actual test set values closely. The actual observations fall well within the 95\% prediction interval throughout the forecast horizon, suggesting the model's uncertainty quantification is reasonable.
+
+The model achieved an RMSE of 0.748 and MAE of 0.637, meaning forecasts were off by less than 1°C on average. The MAPE of 4.45\% indicates the model erred by around 4–5\% relative to actual values, and a MASE of 0.649 < 1 confirms the model outperforms a naive seasonal benchmark.
+
+Despite the Ljung-Box test indicating some remaining autocorrelation in the residuals, the ETS(A,N,A) model performs reasonably well on the test set. The seasonal pattern is well captured, and the prediction intervals are neither too narrow nor too wide. However, the residual autocorrelation suggests there may be structure the model is missing.
+
+\subsection{Dynamic Regression Models Forecasting}
+
+<<forecasting, echo=TRUE, fig.cap="Wellington Temperature Forecast", fig.pos="H">>=
+# Produce point forecasts and prediction intervals for h = 12 months
+# Can add ETS and ARIMA models to the pipeline alongside best_dynamic
+forecasts <- best_dynamic %>%
+  forecast(new_data = test) 
+
+# compare forecast errors on test set
+accuracy(forecasts, data) %>% 
+  select(.model, .type, RMSE, MAE, MAPE) %>%
+  arrange(RMSE)
+
+# plotting forecasts against test set ("zoomed" in for visibility)
+forecasts %>%
+  # Filtering training data to only show recent years (e.g., 2023 onwards)
+  autoplot(training %>% filter(Date >= yearmonth("2023 Jan")), level = c(80, 95)) +
+  autolayer(test, Temperature, color = "black", linewidth = 0.8) +
+  labs(title = "Wellington Monthly Temperature Forecast vs Actuals",
+       subtitle = "Zoomed View: Jan 2023 - April 2026",
+       y = "Temperature (°C)", 
+       x = "Date") +
+  theme_minimal()
+@
+
+\section{LLMs in Time Series Analysis}
+
+\section{Member Contributions}
+
+\begin{itemize}
+    \item \textbf{[Eric]:} Completed Sections 
+    \item \textbf{[Simon]:} Completed Sections
+    \item \textbf{[Dominicus]:} Completed Sections
+\end{itemize}
+
+\end{document}
