@@ -1,3 +1,4 @@
+% !Rnw weave = knitr
 \documentclass[11pt, a4paper]{article}
 
 % packages
@@ -17,7 +18,6 @@
 \date{\today}
 
 \begin{document}
-\SweaveOpts{concordance=TRUE}
 
 \maketitle
 
@@ -176,10 +176,73 @@ where $\varepsilon_t \sim \mathrm{NID}(0,\ 0.7357)$ and $\ell_0 = 13.7527$.
 
 \section{ARIMA Models}
 
+\subsection{Transformations/ Differencing Required?}
+
+<<arima-models-transformations, echo=TRUE>>=
+# 1. Determine Required Differencing
+# Check how many seasonal differences are required
+training %>%
+  features(Temperature, unitroot_nsdiffs)
+
+# Check how many first differences are required AFTER a seasonal difference
+training %>%
+  mutate(diff_temp = difference(Temperature, 12)) %>%
+  features(diff_temp, unitroot_ndiffs)
+
+# 2. Manual Model Identification
+# Plot the differenced data alongside its ACF and PACF.
+training %>%
+  gg_tsdisplay(difference(Temperature, 12), plot_type = "partial", lag_max = 36) +
+  labs(title = "Seasonally Differenced Temperature")
+@
+
+1. Transformations (Variance Stabilization) transformations help to stabilize the variance of a time series. In our R code, we did not apply any transformations (such as a logarithm or Box-Cox). This is because the seasonal fluctuations in temperature data typically have a constant variance over time. For ARIMA models, our primary requirement is instead to stabilize the mean of the time series. 
+
+2. Differencing (Mean Stabilization)To stabilize the mean and achieve stationarity, we use differencing. Differencing can be helpful to remove changes in the level of a time series, which eliminates (or reduces) trend and seasonality.In this specific model, we applied one seasonal difference and zero first differences.The Seasonal Difference: A seasonal difference is the difference between an observation and the previous observation from the same season. Because we are dealing with monthly temperature data, our seasonal period is $m=12$. 
+
+\subsection{Methodology}
+
 <<arima-models, echo=TRUE>>=
-# Insert ARIMA model fitting + code
+# 3. Fit Candidate ARIMA Models
+
+fit_arima <- training %>%
+  model(
+    manual_1 = ARIMA(Temperature ~ pdq(0,0,1) + PDQ(0,1,1)), 
+    manual_2 = ARIMA(Temperature ~ pdq(1,0,0) + PDQ(0,1,1)),
+    
+    auto_stepwise = ARIMA(Temperature),
+    
+    auto_search = ARIMA(Temperature, stepwise = FALSE)
+  )
+
+fit_arima %>% select(auto_search) %>% report()
+
+# Compare models wit AICc 
+glance(fit_arima) %>% 
+  arrange(AICc) %>% 
+  select(.model:BIC)
+
+best_arima <- fit_arima %>% select(manual_2)
+
+best_arima %>% report()
 
 @
+
+Methodology: we shortlist candidate models using both manual inspection and automated algorithms, evaluating them based on the Corrected Akaike's Information Criterion (AICc).  
+
+1. Manual Selection Plot the Autocorrelation Function (ACF) and Partial Autocorrelation Function (PACF) of the appropriately differenced data.  Examine the non-seasonal lags to identify the non-seasonal AR(p) and MA(q) orders. For example, if the ACF tails off and the PACF cuts off after lag p, it suggests an AR(p) model. If the ACF cuts off after lag q and the PACF tails off, it suggests an MA(q) model.  Examine the seasonal lags to identify the seasonal AR(P) and MA(Q) orders .  Fit these chosen models using the ARIMA() function.2. Automatic Selection Stepwise Algorithm: The ARIMA() function in the fable package automatically finds the best ARIMA model by default. It uses a stepwise algorithm to efficiently traverse the model space and selects the model with the lowest AICc.  Exhaustive Search: By setting stepwise = FALSE and approximation = FALSE, the function will search a much larger set of models, which takes longer but can sometimes find a better fitting model than the stepwise approach.  
+
+3. Model Evaluation Check the residuals of your shortlisted models. The residuals should look like white noise. Use \texttt{gg\_tsresiduals()} to visually inspect the ACF of the residuals and perform a Ljung-Box test to ensure they are uncorrelated. 
+
+The manual candidate ARIMA(1,0,0)(0,1,1) with drift was selected as the best model based on the lowest AICc of 1950.06, outperforming both automatic procedures by a substantial margin. The stepwise algorithm performed poorly, and the exhaustive search selected an overly complex ARIMA(2,0,1)(2,1,0) model with a AICc of 137 relative to the best model, a clear sign of overfitting on the training set. This result illustrates that automatic model selection is not always superior to theory-driven manual specification; the ACF and PACF of the seasonally differenced series clearly indicated AR(1) non-seasonal structure and SMA(1) seasonal structure, and the model built directly from those patterns generalised best.
+
+\subsection{Backshift Notation}
+
+\[
+(1 - 0.3173\,B)(1 - B^{12})\,y_t 
+= 0.0085 + (1 - 0.8785\,B^{12})\,\varepsilon_t
+\]
+where $\varepsilon_t \sim \mathrm{NID}(0,\ 0.8191)$.
 
 \section{Dynamic Regression Models}
 
@@ -281,6 +344,22 @@ The Ljung-Box test shows with a test statistic of 62.03 and a p-value of 0.0016 
 
 Based on the Ljung-Box result and the significant ACF spikes at seasonal lags, the ETS(A,N,A) model residuals are not fully consistent with white noise. This suggests the model may not have captured all the structure in the data, and therefore some caution is warranted when using this model for forecasting. Prediction intervals in particular may be underestimated.
 
+\subsection{ARIMA Models Assumptions}
+
+<<arima-assumptions, echo=TRUE, fig.cap="Residual Diagnostics for ARIMA Model", fig.pos="H">>=
+# 4. Residual Diagnostics
+
+augment(best_arima) %>%
+  features(.innov, ljung_box, lag = 24, dof = 3)
+@
+
+When evaluating the time plot of the innovation residuals, we observe that the series fluctuates around the zero mark, which indicates the errors have a zero mean. While the overall vertical spread of the errors appears roughly constant—suggesting we have met the constant variance assumption—there is a distinct, repeating pattern of clustering across the timeline. This predictable recurring pattern violates the white noise assumption, indicating that the model has failed to capture all the information, likely missing a seasonal or cyclic component that has been left behind in the residuals
+
+ACF Plot of Residuals When examining the ACF plot, we observe five significant spikes poking outside the dashed blue boundary lines.For a white noise series, we would expect approximately 95\% of the autocorrelation spikes to sit safely inside these bounds. Because multiple spikes fall outside the lines, the residuals are significantly correlated across time, which violates the core assumption of white noise. This indicates that there is still predictable information left over that our ARIMA model failed to capture, and we should follow up with a Ljung-Box test to formally evaluate the autocorrelations as a collective group
+
+Histogram of Residuals When evaluating the .resid histogram for our forecasting model, we observe a symmetric, bell-shaped distribution that is centered at exactly zero. Zero Mean: The center of the distribution at zero indicates that our model's residuals have a zero mean. This confirms that our forecasts are not biased; on average, the forecast errors cancel each other out, meaning the model does not systematically over-forecast or under-forecast the data.Normally Distributed: The symmetric bell shape confirms that the residuals are normally distributed. This shape shows that large forecast errors are rare, and smaller errors occur with equal frequency in both the positive and negative directions.
+Prediction Intervals: Because we have confirmed that our residuals are normally distributed, we can safely rely on the mathematical calculations used to generate our prediction intervals. The symmetric, bell-shaped distribution centred near zero is consistent with the normality assumption, suggesting that the 95\% prediction intervals derived from this model are reliable.
+
 \subsection{Dynamic Regression Models Assumptions}
 
 <<assumption-checking, echo=TRUE, fig.cap="Residual Diagnostics for the K=3 Dynamic Regression Model", fig.pos="H">>=
@@ -298,7 +377,7 @@ For the model to be trusted for forecasting, the residuals must resemble indepen
 
 \section{Forecasting}
 
-\subsection{}
+\subsection{ETS Models Forecasting}
 
 <<ets-forecasting, echo=TRUE, fig.cap="ETS Model Forecasts vs Actuals", fig.pos="H">>=
 fc <- best_fit %>%
@@ -314,7 +393,7 @@ fc %>%
 fc %>%
   autoplot(
     data %>% filter(Date >= yearmonth("2022 Jan")),
-    level = 95,
+    level = c(80, 95),
     alpha = 0.5
   ) +
   labs(title = "ETS Model Forecasts vs Actuals",
@@ -328,32 +407,138 @@ The model achieved an RMSE of 0.748 and MAE of 0.637, meaning forecasts were off
 
 Despite the Ljung-Box test indicating some remaining autocorrelation in the residuals, the ETS(A,N,A) model performs reasonably well on the test set. The seasonal pattern is well captured, and the prediction intervals are neither too narrow nor too wide. However, the residual autocorrelation suggests there may be structure the model is missing.
 
+\subsection{ARIMA Models Forecasting}
+
+<<arima-forecasting, echo= TRUE, fig.cap="ARIMA Model Forecast vs Actuals", fig.pos="H">>=
+# 5. Forecasting and Test Set Evaluation
+
+forecast_arima <- best_arima %>%
+  forecast(h = 12)
+
+# Test set accuracy — pass full data for correct MASE
+forecast_arima %>%
+  accuracy(data) %>%
+  select(.model, RMSE, MAE, MAPE, MASE)
+
+# Plot forecast against recent data
+forecast_arima %>%
+  autoplot(
+    data %>% filter(Date >= yearmonth("2022 Jan")),
+    level = c(80, 95),
+    alpha = 0.5
+  ) +
+  labs(title = "ARIMA(1,0,0)(0,1,1) Forecast vs Actuals",
+       y = "Temperature (°C)", x = "Date") +
+  theme_minimal()
+
+@
+
+The ARIMA(1,0,0)(0,1,1) model with drift produces well-calibrated forecasts over the 12-month test horizon from May 2025 to April 2026. The point forecasts closely track the actual observed temperatures, correctly capturing both the summer peak and winter trough of the seasonal cycle. All actual observations fall comfortably within the 95\% prediction interval throughout the forecast horizon, indicating the model's uncertainty quantification is appropriate.
+
+The model achieved an RMSE of 0.690 and MAE of 0.576, meaning forecasts were on average within 0.58°C of the actual values. The MAPE of 4.07\% confirms errors are small relative to the magnitude of Wellington temperatures, and a MASE of 0.586 demonstrates the model outperforms a seasonal naïve benchmark by approximately 41\%.
+
+The prediction interval is notably narrow, remaining within roughly +-1.5°C for most of the forecast horizon, which reflects the high regularity of Wellington's seasonal temperature cycle and the model's confidence in its seasonal pattern.
+
 \subsection{Dynamic Regression Models Forecasting}
 
 <<forecasting, echo=TRUE, fig.cap="Wellington Temperature Forecast", fig.pos="H">>=
 # Produce point forecasts and prediction intervals for h = 12 months
 # Can add ETS and ARIMA models to the pipeline alongside best_dynamic
 forecasts <- best_dynamic %>%
-  forecast(new_data = test) 
+  forecast(h=12) 
 
 # compare forecast errors on test set
 accuracy(forecasts, data) %>% 
-  select(.model, .type, RMSE, MAE, MAPE) %>%
+  select(.model, .type, RMSE, MAE, MAPE, MASE) %>%
   arrange(RMSE)
 
 # plotting forecasts against test set ("zoomed" in for visibility)
 forecasts %>%
   # Filtering training data to only show recent years (e.g., 2023 onwards)
-  autoplot(training %>% filter(Date >= yearmonth("2023 Jan")), level = c(80, 95)) +
+  autoplot(data %>% filter(Date >= yearmonth("2023 Jan")), level = c(80, 95)) +
   autolayer(test, Temperature, color = "black", linewidth = 0.8) +
   labs(title = "Wellington Monthly Temperature Forecast vs Actuals",
        subtitle = "Zoomed View: Jan 2023 - April 2026",
-       y = "Temperature (°C)", 
+       y = "Temperature (C)", 
        x = "Date") +
   theme_minimal()
 @
 
+\subsection{Forecast Comparison}
+
+<<forecasting-combined, echo=TRUE, fig.cap="Combined Forecasts vs Actuals: All Three Models">>=
+# Combine all three best models and forecast together
+fit_all <- training %>%
+  model(
+    ETS     = ETS(Temperature ~ error("A") + trend("N") + season("A")),
+    ARIMA   = ARIMA(Temperature ~ pdq(1,0,0) + PDQ(0,1,1)),
+    Dynamic = ARIMA(Temperature ~ trend() + fourier(K = 3))
+  )
+
+fc_all <- fit_all %>% forecast(h = 12)
+
+# Combined accuracy table
+fc_all %>%
+  accuracy(data) %>%
+  select(.model, RMSE, MAE, MAPE, MASE) %>%
+  arrange(RMSE)
+
+# Combined plot
+fc_all %>%
+  autoplot(
+    data %>% filter(Date >= yearmonth("2022 Jan")),
+    level = c(80, 95),
+    alpha = 0.4
+  ) +
+  autolayer(test, Temperature, colour = "black", linewidth = 0.8) +
+  labs(title = "Wellington Temperature: All Model Forecasts vs Actuals",
+       subtitle = "May 2025 - April 2026 (h = 12)",
+       y = "Temperature (\u00b0C)", x = "Date") +
+  theme_minimal()
+@
+
+All three models produced reasonable forecasts, successfully capturing 
+Wellington's strong seasonal cycle over the 12-month test horizon. 
+However, the models differ meaningfully in their accuracy and 
+assumption satisfaction.
+
+The ARIMA(1,0,0)(0,1,1) with drift was the best performing 
+model across all metrics, achieving an RMSE of 0.690 and MASE of 0.586. 
+This represents approximately a 41\% improvement over a seasonal 
+naive benchmark. The inclusion of an AR(1) term allowed the model 
+to capture short-term autocorrelation that the ETS model left unmodelled, 
+and the drift term accounted for the slow warming trend identified in 
+the STL decomposition. Residual diagnostics, however, indicated the 
+Ljung-Box test rejected white noise ($p = 0.00031$), suggesting some 
+remaining structure.
+
+The ETS(A,N,A) model performed competitively, achieving an RMSE of 
+0.748 and MASE of 0.649, only marginally worse than the ARIMA model. 
+This is consistent with the theoretical equivalence between ETS(A,N,A) 
+and ARIMA(0,1,1)(0,1,1); the two models capture similar 
+dynamics, with the primary difference being the AR(1) term in the 
+winning ARIMA specification. The ETS model also failed the Ljung-Box 
+test ($p = 0.0016$), indicating residual autocorrelation.
+
+The Dynamic Regression model (K=3) performed weakest on the test set 
+with an RMSE of 0.759 and MASE of 0.659, despite having the best 
+residual diagnostics of all three models, the only model whose 
+residuals passed the Ljung-Box test ($p = 0.842$). This illustrates 
+an important caveat: a well-specified model in-sample does not 
+guarantee the best out-of-sample performance. The Fourier terms 
+impose a fixed seasonal structure that may be less adaptive than the 
+data-driven seasonal updating in ETS and ARIMA. Additionally, the 
+dynamic regression's wider prediction intervals (showing both 80\% 
+and 95\% bands) reflect greater uncertainty, though all actual 
+observations remained within the 95\% bounds.
+
+Overall, the ARIMA model is recommended as the primary forecasting 
+tool for Wellington monthly temperatures, with the ETS model as a 
+close and computationally simpler alternative.
+
 \section{LLMs in Time Series Analysis}
+
+
 
 \section{Member Contributions}
 
