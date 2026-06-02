@@ -349,6 +349,9 @@ Based on the Ljung-Box result and the significant ACF spikes at seasonal lags, t
 <<arima-assumptions, echo=TRUE, fig.cap="Residual Diagnostics for ARIMA Model", fig.pos="H">>=
 # 4. Residual Diagnostics
 
+best_arima %>%
+  gg_tsresiduals(lag_max = 36)
+
 augment(best_arima) %>%
   features(.innov, ljung_box, lag = 24, dof = 3)
 @

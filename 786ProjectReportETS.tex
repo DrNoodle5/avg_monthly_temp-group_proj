@@ -595,6 +595,19 @@ Based on the Ljung-Box result and the significant ACF spikes at seasonal lags, t
 \begin{alltt}
 \hlcom{# 4. Residual Diagnostics}
 
+\hldef{best_arima} \hlopt{%>%}
+  \hlkwd{gg_tsresiduals}\hldef{(}\hlkwc{lag_max} \hldef{=} \hlnum{36}\hldef{)}
+\end{alltt}
+\end{kframe}\begin{figure}[H]
+
+{\centering \includegraphics[width=1\linewidth]{figure/arima-assumptions-1} 
+
+}
+
+\caption[Residual Diagnostics for ARIMA Model]{Residual Diagnostics for ARIMA Model}\label{fig:arima-assumptions}
+\end{figure}
+
+\begin{kframe}\begin{alltt}
 \hlkwd{augment}\hldef{(best_arima)} \hlopt{%>%}
   \hlkwd{features}\hldef{(.innov, ljung_box,} \hlkwc{lag} \hldef{=} \hlnum{24}\hldef{,} \hlkwc{dof} \hldef{=} \hlnum{3}\hldef{)}
 \end{alltt}
